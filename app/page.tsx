@@ -14,84 +14,103 @@ type Report = {
   coverage: number;
 };
 
+type Item = {
+  name: string;
+  size: number;
+  status: 'bekliyor' | 'işleniyor' | 'tamam' | 'hata';
+  markdown: string;
+  report: Report | null;
+  error?: string;
+};
+
 // Türkçe metin için yaklaşık Claude token tahmini
 const estTokens = (chars: number) => Math.ceil(chars / 3.2);
 
 export default function Home() {
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [markdown, setMarkdown] = useState<string>('');
-  const [report, setReport] = useState<Report | null>(null);
-  const [pdfBytes, setPdfBytes] = useState<number>(0);
+  const [items, setItems] = useState<Item[]>([]);
+  const [sel, setSel] = useState<number>(-1);
   const [status, setStatus] = useState<string>('');
   const [progress, setProgress] = useState<number>(0);
   const [busy, setBusy] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [over, setOver] = useState(false);
-  const pdfDocRef = useRef<any>(null);
+  const pdfDocsRef = useRef<Record<number, any>>({});
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleFile = useCallback(async (file: File) => {
-    if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
-      setStatus('Sadece PDF dosyası kabul edilir.');
-      return;
-    }
-    setBusy(true);
-    setMarkdown('');
-    setReport(null);
-    setFileName(file.name);
-    setPdfBytes(file.size);
-    setStatus('PDF okunuyor…');
-    setProgress(5);
-    try {
-      const pdfjs = await import('pdfjs-dist');
-      pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-      const data = new Uint8Array(await file.arrayBuffer());
-      const pdf = await pdfjs.getDocument({ data }).promise;
-      pdfDocRef.current = pdf;
-      const result = await convertPdfToMarkdown(pdf, {
-        onProgress: (p: number, n: number, phase: string) => {
-          const base = phase === 'analiz' ? 0 : 50;
-          setProgress(10 + base * 0.8 + (p / n) * 40);
-          setStatus(`Sayfa ${p}/${n} — ${phase}`);
-        },
-      });
-      setMarkdown(result.markdown);
-      setReport(result.report as Report);
-      setProgress(100);
-      setStatus('Dönüşüm tamamlandı.');
-    } catch (e: any) {
-      setStatus('HATA: ' + (e?.message || String(e)));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  const patch = (idx: number, p: Partial<Item>) =>
+    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...p } : it)));
 
-  const download = () => {
-    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+  const handleFiles = useCallback(async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList).filter((f) => f.name.toLowerCase().endsWith('.pdf'));
+    if (!files.length) { setStatus('Sadece PDF dosyaları kabul edilir.'); return; }
+
+    const startIdx = items.length;
+    const newItems: Item[] = files.map((f) => ({
+      name: f.name, size: f.size, status: 'bekliyor', markdown: '', report: null,
+    }));
+    setItems((prev) => [...prev, ...newItems]);
+    setBusy(true);
+
+    const pdfjs = await import('pdfjs-dist');
+    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+    // Sıralı işleme: her dosya tam kapasiteyle, bellek şişmeden
+    for (let k = 0; k < files.length; k++) {
+      const idx = startIdx + k;
+      patch(idx, { status: 'işleniyor' });
+      setSel(idx);
+      setStatus(`${files[k].name} işleniyor (${k + 1}/${files.length})…`);
+      try {
+        const data = new Uint8Array(await files[k].arrayBuffer());
+        const pdf = await pdfjs.getDocument({ data }).promise;
+        pdfDocsRef.current[idx] = pdf;
+        const result = await convertPdfToMarkdown(pdf, {
+          onProgress: (p: number, n: number) => setProgress(((k + p / n / 2) / files.length) * 100),
+        });
+        patch(idx, { status: 'tamam', markdown: result.markdown, report: result.report as Report });
+      } catch (e: any) {
+        patch(idx, { status: 'hata', error: e?.message || String(e) });
+      }
+    }
+    setProgress(100);
+    setStatus(`${files.length} dosya işlendi.`);
+    setBusy(false);
+  }, [items.length]);
+
+  const downloadOne = (it: Item) => {
+    const blob = new Blob([it.markdown], { type: 'text/markdown;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = (fileName || 'belge').replace(/\.pdf$/i, '') + '.md';
+    a.download = it.name.replace(/\.pdf$/i, '') + '.md';
     a.click();
     URL.revokeObjectURL(a.href);
   };
 
+  const downloadAll = () => {
+    items.filter((it) => it.status === 'tamam').forEach((it, i) =>
+      setTimeout(() => downloadOne(it), i * 300)
+    );
+  };
+
   const copyMd = async () => {
-    await navigator.clipboard.writeText(markdown);
+    if (sel < 0) return;
+    await navigator.clipboard.writeText(items[sel].markdown);
     setStatus('Panoya kopyalandı.');
   };
 
   const aiCleanup = async () => {
+    if (sel < 0) return;
     setAiBusy(true);
     setStatus('AI ile temizleniyor…');
     try {
       const res = await fetch('/api/cleanup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ markdown }),
+        body: JSON.stringify({ markdown: items[sel].markdown }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'AI servisi yanıt vermedi');
-      setMarkdown(data.markdown);
+      patch(sel, { markdown: data.markdown });
       setStatus(`AI temizliği tamamlandı (${data.engine}).`);
     } catch (e: any) {
       setStatus('AI HATASI: ' + e.message + ' — deterministik çıktı korunuyor.');
@@ -101,13 +120,15 @@ export default function Home() {
   };
 
   const aiVision = async () => {
-    if (!report?.scannedPages.length || !pdfDocRef.current) return;
+    const it = sel >= 0 ? items[sel] : null;
+    const pdfDoc = pdfDocsRef.current[sel];
+    if (!it?.report?.scannedPages.length || !pdfDoc) return;
     setAiBusy(true);
     try {
-      let md = markdown;
-      for (const pNum of report.scannedPages) {
+      let md = it.markdown;
+      for (const pNum of it.report.scannedPages) {
         setStatus(`Sayfa ${pNum} AI Vision ile okunuyor…`);
-        const page = await pdfDocRef.current.getPage(pNum);
+        const page = await pdfDoc.getPage(pNum);
         const viewport = page.getViewport({ scale: 2 });
         const canvas = document.createElement('canvas');
         canvas.width = viewport.width;
@@ -123,7 +144,7 @@ export default function Home() {
         if (!res.ok) throw new Error(data.error || 'Vision servisi hatası');
         md = md.replace(`<!-- Sayfa ${pNum} -->\n`, `<!-- Sayfa ${pNum} (AI Vision) -->\n${data.markdown}\n`);
       }
-      setMarkdown(md);
+      patch(sel, { markdown: md });
       setStatus('Taranmış sayfalar AI Vision ile tamamlandı.');
     } catch (e: any) {
       setStatus('VISION HATASI: ' + e.message);
@@ -132,9 +153,12 @@ export default function Home() {
     }
   };
 
-  const pdfTok = estTokens(pdfBytes * 0.75); // PDF binary → Claude'a yüklendiğinde yaklaşık maliyet
-  const mdTok = estTokens(markdown.length);
+  const cur = sel >= 0 ? items[sel] : null;
+  const report = cur?.report ?? null;
+  const pdfTok = cur ? estTokens(cur.size * 0.75) : 0;
+  const mdTok = cur ? estTokens(cur.markdown.length) : 0;
   const savingPct = pdfTok > 0 ? Math.max(0, Math.round((1 - mdTok / pdfTok) * 100)) : 0;
+  const doneCount = items.filter((i) => i.status === 'tamam').length;
 
   return (
     <main className="wrap">
@@ -143,7 +167,7 @@ export default function Home() {
       </div>
       <p className="sub">
         PDF belgelerini Claude için token-verimli Markdown&apos;a dönüştürür. Dönüşüm tamamen
-        tarayıcınızda çalışır — dosya hiçbir sunucuya gönderilmez. Kalite raporu ✅ %100
+        tarayıcınızda çalışır — dosyalar hiçbir sunucuya gönderilmez. Kalite raporu ✅ %100
         göstermeden dosyayı kullanmayın.
       </p>
 
@@ -152,26 +176,57 @@ export default function Home() {
         onClick={() => inputRef.current?.click()}
         onDragOver={(e) => { e.preventDefault(); setOver(true); }}
         onDragLeave={() => setOver(false)}
-        onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files?.[0]; if (f) handleFile(f); }}
+        onDrop={(e) => { e.preventDefault(); setOver(false); if (e.dataTransfer.files?.length) handleFiles(e.dataTransfer.files); }}
         role="button"
         tabIndex={0}
         onKeyDown={(e) => e.key === 'Enter' && inputRef.current?.click()}
       >
-        <strong>PDF dosyasını buraya bırakın</strong>
-        <p>veya tıklayarak seçin — dosya cihazınızdan çıkmaz</p>
+        <strong>PDF dosyalarını buraya bırakın</strong>
+        <p>tek veya çoklu seçim — dosyalar cihazınızdan çıkmaz</p>
         <input
           ref={inputRef}
           type="file"
           accept="application/pdf"
+          multiple
           hidden
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }}
+          onChange={(e) => { if (e.target.files?.length) handleFiles(e.target.files); e.target.value = ''; }}
         />
       </div>
 
       {busy && <div className="progress"><div className="p" style={{ width: `${progress}%` }} /></div>}
-      {status && <div className="status">{fileName && <span className="fname">{fileName}</span>} {status}</div>}
+      {status && <div className="status">{status}</div>}
 
-      {report && (
+      {items.length > 0 && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <h3>Dosya Kuyruğu ({doneCount}/{items.length})</h3>
+          {items.map((it, i) => (
+            <div
+              key={i}
+              className="qrow"
+              style={{ cursor: 'pointer', background: i === sel ? 'var(--panel-2)' : 'transparent', borderRadius: 6, padding: '7px 8px' }}
+              onClick={() => setSel(i)}
+            >
+              <span className="k fname" style={{ color: i === sel ? 'var(--adr-orange)' : undefined }}>{it.name}</span>
+              <span className={'v ' + (it.status === 'tamam' ? (it.report && it.report.coverage === 100 && !it.report.encodingIssues.length ? 'ok' : 'warn') : it.status === 'hata' ? 'err' : '')}>
+                {it.status === 'tamam'
+                  ? (it.report ? `%${it.report.coverage}` : '✓')
+                  : it.status.toUpperCase()}
+              </span>
+            </div>
+          ))}
+          {doneCount > 1 && (
+            <div className="actions">
+              <button className="btn primary" onClick={downloadAll}>TÜMÜNÜ İNDİR ({doneCount} .md)</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {cur && cur.status === 'hata' && (
+        <div className="warnbox" style={{ marginTop: 18 }}>⚠ {cur.name}: {cur.error}</div>
+      )}
+
+      {report && cur && (
         <div className="grid">
           <div>
             <div className="card">
@@ -213,12 +268,12 @@ export default function Home() {
           </div>
 
           <div className="card">
-            <h3>Markdown Önizleme</h3>
-            <div className="preview">{markdown || '(boş)'}</div>
+            <h3>Markdown Önizleme — {cur.name}</h3>
+            <div className="preview">{cur.markdown || '(boş)'}</div>
             <div className="actions">
-              <button className="btn primary" onClick={download} disabled={!markdown}>.md İNDİR</button>
-              <button className="btn ghost" onClick={copyMd} disabled={!markdown}>KOPYALA</button>
-              <button className="btn ghost" onClick={aiCleanup} disabled={!markdown || aiBusy}>
+              <button className="btn primary" onClick={() => downloadOne(cur)} disabled={!cur.markdown}>.md İNDİR</button>
+              <button className="btn ghost" onClick={copyMd} disabled={!cur.markdown}>KOPYALA</button>
+              <button className="btn ghost" onClick={aiCleanup} disabled={!cur.markdown || aiBusy}>
                 {aiBusy ? 'AI ÇALIŞIYOR…' : 'AI İLE TEMİZLE'}
               </button>
               {report.scannedPages.length > 0 && (
