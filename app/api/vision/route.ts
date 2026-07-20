@@ -12,9 +12,18 @@ KURALLAR:
 5. Okunamayan kısımlar için [OKUNAMADI] yaz.
 6. Yanıtın SADECE Markdown olsun — açıklama ekleme.`;
 
+const DESCRIBE_PROMPT = `Bu görüntü, bir belgeden kırpılmış tek bir görsel öğedir (tehlikeli madde / ADR belgesi bağlamı).
+GÖREV: Görselin ne olduğunu TEK SATIRDA, kısa ve nesnel biçimde Türkçe tanımla.
+- Tehlike etiketi/piktogram ise: sınıf numarasını ve sembolü belirt (örn. "ADR etiketi sınıf 2.2 — yeşil eşkenar dörtgen, gaz tüpü sembolü").
+- GHS piktogramı ise kodunu belirt (örn. "GHS04 — basınçlı gaz").
+- Logo, kaşe, imza ise onu yaz.
+- Grafik/tablo görseli ise ne gösterdiğini özetle.
+- Emin olamadığın kısımlar için [BELİRSİZ] yaz. Tahmin uydurma.
+Yanıtın sadece bu tek satırlık tanım olsun; başlık, madde işareti veya açıklama ekleme.`;
+
 export async function POST(req: Request) {
   try {
-    const { imageB64, geminiKey } = await req.json();
+    const { imageB64, geminiKey, mode } = await req.json();
     if (!imageB64) return NextResponse.json({ error: 'imageB64 alanı gerekli' }, { status: 400 });
 
     const key = geminiKey || process.env.GEMINI_API_KEY;
@@ -32,7 +41,7 @@ export async function POST(req: Request) {
             {
               role: 'user',
               parts: [
-                { text: VISION_PROMPT },
+                { text: mode === 'describe' ? DESCRIBE_PROMPT : VISION_PROMPT },
                 { inlineData: { mimeType: 'image/jpeg', data: imageB64 } },
               ],
             },

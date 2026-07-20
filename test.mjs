@@ -2,7 +2,7 @@
  * Motor regresyon testi — `node test.mjs`
  * Motorda değişiklik yaptıktan sonra çalıştırın; tüm kontroller ✅ olmalı.
  */
-import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { convertPdfToMarkdown } from './lib/engine.mjs';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
@@ -14,7 +14,7 @@ const ab = (f) => { const b = fs.readFileSync(f); return b.buffer.slice(b.byteOf
 
 const data = new Uint8Array(fs.readFileSync('test.pdf'));
 const pdf = await getDocument({ data }).promise;
-const { markdown, report } = await convertPdfToMarkdown(pdf);
+const { markdown, report } = await convertPdfToMarkdown(pdf, { OPS });
 
 const checks = [
   ['Türkçe başlık korunmuş', markdown.includes('TEHLİKELİ MADDE TAŞIMA KONTROL FORMU')],
@@ -27,6 +27,16 @@ const checks = [
   ['Encoding temiz', report.encodingIssues.length === 0],
   ['Uyarı yok', report.warnings.length === 0],
 ];
+
+// --- Görsel tespiti ---
+const imgPdf = await getDocument({ data: new Uint8Array(fs.readFileSync('test_img.pdf')) }).promise;
+const ir = await convertPdfToMarkdown(imgPdf, { OPS });
+checks.push(
+  ['GÖRSEL: gömülü görsel tespit edildi', ir.report.imagesDetected === 1],
+  ['GÖRSEL: yer işareti doğru konumda', /ADR Etiketi[\s\S]{0,80}🖼/.test(ir.markdown)],
+  ['GÖRSEL: rapor uyarısı verildi', ir.report.warnings.some((w) => w.includes('gömülü görsel'))],
+  ['GÖRSEL: metin kaybı yok', ir.markdown.includes('Tünel Kısıtlama Kodu : (E)')],
+);
 
 // --- DOCX ---
 const dx = await convertDocxToMarkdown(ab('test.docx'), mammoth);

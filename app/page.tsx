@@ -17,6 +17,8 @@ type Report = {
   coverage: number;
   sourceType?: string;
   ocrConfidence?: number;
+  imagesDetected?: number;
+  imagePages?: number[];
 };
 
 type Kind = 'pdf' | 'docx' | 'sheet' | 'image' | 'text';
@@ -126,6 +128,7 @@ export default function Home() {
           const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
           pdfDocsRef.current[idx] = pdf;
           result = await convertPdfToMarkdown(pdf, {
+            OPS: (pdfjs as any).OPS,
             onProgress: (p: number, n: number) => setProgress(((k + p / n / 2) / files.length) * 100),
           });
           result.report.sourceType = 'PDF';
@@ -210,6 +213,58 @@ export default function Home() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Vision servisi hatası');
     return data.markdown as string;
+  };
+
+  // PDF içindeki gömülü görselleri kırpıp AI'ya okutur
+  const readImages = async () => {
+    const it = sel >= 0 ? items[sel] : null;
+    const pdfDoc = pdfDocsRef.current[sel];
+    if (!it?.report?.imagePages?.length || !pdfDoc) return;
+    setAiBusy(true);
+    try {
+      let md = it.markdown;
+      const pdfjs = await import('pdfjs-dist');
+      for (const pNum of it.report.imagePages) {
+        const page = await pdfDoc.getPage(pNum);
+        const scale = 3;
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width; canvas.height = viewport.height;
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+
+        const imgs = await (await import('../lib/engine.mjs')).detectImagesOnPage(page, (pdfjs as any).OPS);
+        for (let n = 0; n < imgs.length; n++) {
+          setStatus(`Sayfa ${pNum} · görsel ${n + 1}/${imgs.length} AI ile okunuyor…`);
+          const im = imgs[n];
+          // PDF koordinatı → görüntü koordinatı (sol-üst köşe)
+          const [vx, vy] = viewport.convertToViewportPoint(im.x, im.y + im.h);
+          const pad = 6 * scale;
+          const cw = im.w * scale, ch = im.h * scale;
+          const crop = document.createElement('canvas');
+          crop.width = cw + pad * 2; crop.height = ch + pad * 2;
+          crop.getContext('2d')!.drawImage(canvas, vx - pad, vy - pad, crop.width, crop.height, 0, 0, crop.width, crop.height);
+          const b64 = crop.toDataURL('image/jpeg', 0.9).split(',')[1];
+          const res = await fetch('/api/vision', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imageB64: b64, geminiKey: geminiKey.trim(), mode: 'describe' }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Vision servisi hatası');
+          const marker = `> 🖼 **[GÖRSEL — sayfa ${pNum}, görsel ${n + 1} · ${im.w}×${im.h}px]** — bu alandaki içerik metin değildir, dönüştürülemedi.`;
+          md = md.replace(marker, `> 🖼 **[GÖRSEL — sayfa ${pNum}, görsel ${n + 1}]** ${data.markdown.replace(/\n+/g, ' ').trim()}`);
+        }
+      }
+      patch(sel, {
+        markdown: md,
+        report: it.report ? { ...it.report, warnings: it.report.warnings.map((w) => w.startsWith('AI') ? w : w).concat('Görsel açıklamaları AI tarafından üretilmiştir — ADR etiketi, UN numarası gibi kritik verileri gözle doğrulayın.') } : it.report,
+      });
+      setStatus('Görseller AI ile okundu.');
+    } catch (e: any) {
+      setStatus('GÖRSEL OKUMA HATASI: ' + e.message);
+    } finally {
+      setAiBusy(false);
+    }
   };
 
   const aiVision = async () => {
@@ -386,6 +441,10 @@ export default function Home() {
                 <div className="qrow"><span className="k">{cur.kind === 'sheet' ? 'Çalışma sayfası' : 'Sayfa'}</span><span className="v">{report.numPages}</span></div>
                 <div className="qrow"><span className="k">Karakter</span><span className="v">{report.totalChars.toLocaleString('tr-TR')}</span></div>
                 <div className="qrow"><span className="k">Tablo</span><span className="v">{report.tablesDetected}</span></div>
+                {cur.kind === 'pdf' && (
+                  <div className="qrow"><span className="k">Gömülü görsel</span>
+                    <span className={'v ' + (report.imagesDetected ? 'warn' : 'ok')}>{report.imagesDetected || 'YOK'}</span></div>
+                )}
                 <div className="qrow"><span className="k">Encoding</span>
                   <span className={'v ' + (report.encodingIssues.length ? 'err' : 'ok')}>{report.encodingIssues.length ? 'SORUNLU' : 'TEMİZ'}</span></div>
 
@@ -419,6 +478,11 @@ export default function Home() {
                 <button className="btn ghost" onClick={aiCleanup} disabled={!cur.markdown || aiBusy}>
                   {aiBusy ? 'AI ÇALIŞIYOR…' : 'AI İLE TEMİZLE'}
                 </button>
+                {!!report.imagesDetected && (
+                  <button className="btn ghost" onClick={readImages} disabled={aiBusy}>
+                    GÖRSELLERİ AI İLE OKU ({report.imagesDetected})
+                  </button>
+                )}
                 {canVision && (
                   <button className="btn ghost" onClick={aiVision} disabled={aiBusy}>
                     AI VISION İLE OKU{cur.kind !== 'image' ? ` (${report.scannedPages.length} sayfa)` : ''}
