@@ -14,12 +14,12 @@ KURALLAR:
 
 export async function POST(req: Request) {
   try {
-    const { imageB64 } = await req.json();
+    const { imageB64, geminiKey } = await req.json();
     if (!imageB64) return NextResponse.json({ error: 'imageB64 alanı gerekli' }, { status: 400 });
 
-    const key = process.env.GEMINI_API_KEY;
+    const key = geminiKey || process.env.GEMINI_API_KEY;
     if (!key) {
-      return NextResponse.json({ error: 'GEMINI_API_KEY tanımlı değil (Vercel → Settings → Environment Variables)' }, { status: 500 });
+      return NextResponse.json({ error: 'Gemini API anahtarı yok — sol menüdeki API Anahtarları bölümüne girin (aistudio.google.com üzerinden ücretsiz alınır).' }, { status: 500 });
     }
 
     const res = await fetch(

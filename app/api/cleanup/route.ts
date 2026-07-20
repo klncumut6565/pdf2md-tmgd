@@ -10,8 +10,8 @@ KESİN KURALLAR:
 3. Sayısal değerleri (UN numaraları, miktarlar, tarihler) birebir koru.
 4. Yanıtın SADECE düzeltilmiş Markdown olsun — açıklama, ön söz, kod bloğu işareti ekleme.`;
 
-async function tryGroq(markdown: string): Promise<string | null> {
-  const key = process.env.GROQ_API_KEY;
+async function tryGroq(markdown: string, userKey?: string): Promise<string | null> {
+  const key = userKey || process.env.GROQ_API_KEY;
   if (!key) return null;
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -30,8 +30,8 @@ async function tryGroq(markdown: string): Promise<string | null> {
   return data.choices?.[0]?.message?.content ?? null;
 }
 
-async function tryGemini(markdown: string): Promise<string | null> {
-  const key = process.env.GEMINI_API_KEY;
+async function tryGemini(markdown: string, userKey?: string): Promise<string | null> {
+  const key = userKey || process.env.GEMINI_API_KEY;
   if (!key) return null;
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
@@ -57,7 +57,7 @@ function safeLength(original: string, cleaned: string) {
 
 export async function POST(req: Request) {
   try {
-    const { markdown } = await req.json();
+    const { markdown, groqKey, geminiKey } = await req.json();
     if (!markdown || typeof markdown !== 'string') {
       return NextResponse.json({ error: 'markdown alanı gerekli' }, { status: 400 });
     }
@@ -67,16 +67,16 @@ export async function POST(req: Request) {
 
     const strip = (s: string) => s.replace(/^```(?:markdown|md)?\n?/, '').replace(/\n?```$/, '').trim();
 
-    let out = await tryGroq(markdown);
+    let out = await tryGroq(markdown, groqKey);
     if (out && safeLength(markdown, strip(out))) {
       return NextResponse.json({ markdown: strip(out), engine: 'Groq / Llama 3.3 70B' });
     }
-    out = await tryGemini(markdown);
+    out = await tryGemini(markdown, geminiKey);
     if (out && safeLength(markdown, strip(out))) {
       return NextResponse.json({ markdown: strip(out), engine: 'Gemini 2.0 Flash' });
     }
     return NextResponse.json(
-      { error: 'AI motorları yanıt vermedi veya çıktı içerik kaybı riski taşıyor (API anahtarlarını kontrol edin: GROQ_API_KEY / GEMINI_API_KEY)' },
+      { error: 'AI motorları yanıt vermedi veya çıktı içerik kaybı riski taşıyor (sol menüden API anahtarı girin veya Vercel ortam değişkenlerini kontrol edin)' },
       { status: 502 }
     );
   } catch (e: any) {

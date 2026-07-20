@@ -4,7 +4,13 @@
  */
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { convertPdfToMarkdown } from './lib/engine.mjs';
+import mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
+import { convertDocxToMarkdown } from './lib/docx.mjs';
+import { convertSheetToMarkdown } from './lib/xlsx.mjs';
 import fs from 'fs';
+
+const ab = (f) => { const b = fs.readFileSync(f); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); };
 
 const data = new Uint8Array(fs.readFileSync('test.pdf'));
 const pdf = await getDocument({ data }).promise;
@@ -21,6 +27,24 @@ const checks = [
   ['Encoding temiz', report.encodingIssues.length === 0],
   ['Uyarı yok', report.warnings.length === 0],
 ];
+
+// --- DOCX ---
+const dx = await convertDocxToMarkdown(ab('test.docx'), mammoth);
+checks.push(
+  ['DOCX: başlık hiyerarşisi', dx.markdown.startsWith('# TEHLİKELİ MADDE FAALİYET RAPORU')],
+  ['DOCX: tablo hücreleri', dx.markdown.includes('| 1006 | ARGON, SIKIŞTIRILMIŞ | 2 | 450 |')],
+  ['DOCX: madde listesi', dx.markdown.includes('- Turuncu plakalar okunaklı değil')],
+  ['DOCX: kapsama %100', dx.report.coverage === 100],
+);
+
+// --- XLSX ---
+const xs = convertSheetToMarkdown(ab('test.xlsx'), XLSX);
+checks.push(
+  ['XLSX: sayfa başlığı', xs.markdown.includes('## Sefer Listesi')],
+  ['XLSX: satır verisi', xs.markdown.includes('| 05.01.2026 | 34ABC123 | Ahmet Yılmaz | 1203 | 8.500 |')],
+  ['XLSX: ikinci sayfa', xs.markdown.includes('## Muafiyet')],
+  ['XLSX: 2 tablo', xs.report.tablesDetected === 2],
+);
 
 let fail = 0;
 for (const [name, ok] of checks) {
